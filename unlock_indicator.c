@@ -6,21 +6,21 @@
  * See LICENSE for licensing information
  *
  */
-#include <stdbool.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
-#include <xcb/xcb.h>
-#include <ev.h>
 #include <cairo.h>
 #include <cairo/cairo-xcb.h>
+#include <ev.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <xcb/xcb.h>
 
 #include "i3lock.h"
-#include "xcb.h"
-#include "unlock_indicator.h"
 #include "randr.h"
+#include "unlock_indicator.h"
+#include "xcb.h"
 
 #define BUTTON_RADIUS 90
 #define BUTTON_SPACE (BUTTON_RADIUS + 5)
@@ -107,7 +107,7 @@ auth_state_t auth_state;
 static double scaling_factor(void) {
     const int dpi = (double)screen->height_in_pixels * 25.4 /
                     (double)screen->height_in_millimeters;
-    return (dpi / 96.0);
+    return (dpi / 96.0) * 2.5;  // RG: Everything 3x
 }
 
 /*
@@ -135,14 +135,14 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     cairo_t *xcb_ctx = cairo_create(xcb_output);
 
     /* Creates color array from command line arguments */
-    uint32_t * color_array(char* colorarg) {
-        uint32_t *rgb16 = malloc(sizeof(uint32_t)*3);
+    uint32_t *color_array(char *colorarg) {
+        uint32_t *rgb16 = malloc(sizeof(uint32_t) * 3);
 
         char strgroups[3][3] = {{colorarg[0], colorarg[1], '\0'},
                                 {colorarg[2], colorarg[3], '\0'},
                                 {colorarg[4], colorarg[5], '\0'}};
 
-        for (int i=0; i < 3; i++) {
+        for (int i = 0; i < 3; i++) {
             rgb16[i] = strtol(strgroups[i], NULL, 16);
         }
 
@@ -153,10 +153,10 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
      * and type (line, background and fill). Type defines alpha value and tint.
      * Utilizes color_array() and frees after use.
      */
-    void set_color(cairo_t *cr, char *colorarg, char colortype) {
+    void set_color(cairo_t * cr, char *colorarg, char colortype) {
         uint32_t *rgb16 = color_array(colorarg);
 
-        switch(colortype) {
+        switch (colortype) {
             case 'b': /* Background */
                 cairo_set_source_rgb(cr, rgb16[0] / 255.0, rgb16[1] / 255.0, rgb16[2] / 255.0);
                 break;
@@ -165,7 +165,7 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
                 break;
             case 'f': /* Fill */
                 /* Use a lighter tint of the user defined color for circle fill */
-                for (int i=0; i < 3; i++) {
+                for (int i = 0; i < 3; i++) {
                     rgb16[i] = ((255 - rgb16[i]) * .5) + rgb16[i];
                 }
                 cairo_set_source_rgba(cr, rgb16[0] / 255.0, rgb16[1] / 255.0, rgb16[2] / 255.0, 0.2);
@@ -189,7 +189,7 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
             cairo_pattern_destroy(pattern);
         }
     } else {
-        set_color(xcb_ctx,color,'b'); /* If not image, use color to fill background */
+        set_color(xcb_ctx, color, 'b'); /* If not image, use color to fill background */
         cairo_rectangle(xcb_ctx, 0, 0, resolution[0], resolution[1]);
         cairo_fill(xcb_ctx);
     }
@@ -212,23 +212,22 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
         void set_auth_color(char colortype) {
             switch (auth_state) {
                 case STATE_AUTH_VERIFY:
-                    set_color(ctx,verifycolor,colortype);
+                    set_color(ctx, verifycolor, colortype);
                     break;
                 case STATE_AUTH_LOCK:
-                    set_color(ctx,idlecolor,colortype);
+                    set_color(ctx, idlecolor, colortype);
                     break;
                 case STATE_AUTH_WRONG:
-                    set_color(ctx,wrongcolor,colortype);
+                    set_color(ctx, wrongcolor, colortype);
                     break;
                 case STATE_I3LOCK_LOCK_FAILED:
-                    set_color(ctx,wrongcolor,colortype);
+                    set_color(ctx, wrongcolor, colortype);
                     break;
                 case STATE_AUTH_IDLE:
                     if (unlock_state == STATE_BACKSPACE_ACTIVE) {
-                        set_color(ctx,wrongcolor,colortype);
-                    }
-                    else {
-                        set_color(ctx,idlecolor,colortype);  
+                        set_color(ctx, wrongcolor, colortype);
+                    } else {
+                        set_color(ctx, idlecolor, colortype);
                     }
                     break;
             }
@@ -253,7 +252,7 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
 
         /* Text */
         set_auth_color('l');
-        cairo_set_font_size(ctx, 32.0);
+        cairo_set_font_size(ctx, 36.0);
 
         cairo_text_extents_t time_extents;
         double time_x, time_y;
@@ -297,14 +296,14 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
                       BUTTON_CENTER /* y */,
                       BUTTON_RADIUS /* radius */,
                       highlight_start,
-                      highlight_start + (M_PI / 2.5)); 
+                      highlight_start + (M_PI / 2.5));
 
             /* Set newly drawn lines to erase what they're drawn over */
-            cairo_set_operator(ctx,CAIRO_OPERATOR_CLEAR); 
+            cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
             cairo_stroke(ctx);
 
             /* Back to normal operator */
-            cairo_set_operator(ctx,CAIRO_OPERATOR_OVER); 
+            cairo_set_operator(ctx, CAIRO_OPERATOR_OVER);
             cairo_set_line_width(ctx, 10);
 
             /* Change color of separators based on backspace/active keypress */
@@ -312,20 +311,20 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
 
             /* Separator 1 */
             cairo_arc(ctx,
-                BUTTON_CENTER /* x */,
-                BUTTON_CENTER /* y */,
-                BUTTON_RADIUS /* radius */,
-                highlight_start /* start */,
-                highlight_start + (M_PI / 128.0) /* end */);
+                      BUTTON_CENTER /* x */,
+                      BUTTON_CENTER /* y */,
+                      BUTTON_RADIUS /* radius */,
+                      highlight_start /* start */,
+                      highlight_start + (M_PI / 128.0) /* end */);
             cairo_stroke(ctx);
 
             /* Separator 2 */
             cairo_arc(ctx,
-                BUTTON_CENTER /* x */,
-                BUTTON_CENTER /* y */,
-                BUTTON_RADIUS /* radius */,
-                highlight_start + (M_PI / 2.5) /* start */,
-                (highlight_start + (M_PI / 2.5)) + (M_PI / 128.0) /* end */);
+                      BUTTON_CENTER /* x */,
+                      BUTTON_CENTER /* y */,
+                      BUTTON_RADIUS /* radius */,
+                      highlight_start + (M_PI / 2.5) /* start */,
+                      (highlight_start + (M_PI / 2.5)) + (M_PI / 128.0) /* end */);
             cairo_stroke(ctx);
         }
     }
@@ -382,7 +381,7 @@ static void time_redraw_cb(struct ev_loop *loop, ev_periodic *w, int revents) {
     redraw_screen();
 }
 
-void start_time_redraw_tick(struct ev_loop* main_loop) {
+void start_time_redraw_tick(struct ev_loop *main_loop) {
     if (time_redraw_tick) {
         ev_periodic_set(time_redraw_tick, 1.0, 60., 0);
         ev_periodic_again(main_loop, time_redraw_tick);
@@ -390,8 +389,8 @@ void start_time_redraw_tick(struct ev_loop* main_loop) {
         /* When there is no memory, we just don’t have a timeout. We cannot
         * exit() here, since that would effectively unlock the screen. */
         if (!(time_redraw_tick = calloc(sizeof(struct ev_periodic), 1)))
-        return;
-        ev_periodic_init(time_redraw_tick,time_redraw_cb, 1.0, 60., 0);
+            return;
+        ev_periodic_init(time_redraw_tick, time_redraw_cb, 1.0, 60., 0);
         ev_periodic_start(main_loop, time_redraw_tick);
     }
 }
