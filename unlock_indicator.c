@@ -17,10 +17,14 @@
 #include <time.h>
 #include <xcb/xcb.h>
 
+#include "dpi.h"
 #include "i3lock.h"
 #include "randr.h"
 #include "unlock_indicator.h"
 #include "xcb.h"
+
+// Additionally scales the elements on the screen
+#define SCALING_MULTIPLIER 2.5
 
 #define BUTTON_RADIUS 90
 #define BUTTON_SPACE (BUTTON_RADIUS + 5)
@@ -101,24 +105,15 @@ unlock_state_t unlock_state;
 auth_state_t auth_state;
 
 /*
- * Returns the scaling factor of the current screen. E.g., on a 227 DPI MacBook
- * Pro 13" Retina screen, the scaling factor is 227/96 = 2.36.
- */
-static double scaling_factor(void) {
-    const int dpi = (double)screen->height_in_pixels * 25.4 /
-                    (double)screen->height_in_millimeters;
-    return (dpi / 96.0) * 2.5;  // RG: Everything 3x
-}
-
-/*
  * Draws global image with fill color onto a pixmap with the given
  * resolution and returns it.
  */
 xcb_pixmap_t draw_image(uint32_t *resolution) {
     xcb_pixmap_t bg_pixmap = XCB_NONE;
-    int button_diameter_physical = ceil(scaling_factor() * BUTTON_DIAMETER);
+    const double scaling_factor = get_dpi_value() / 96.0 * SCALING_MULTIPLIER;
+    int button_diameter_physical = ceil(scaling_factor * BUTTON_DIAMETER);
     DEBUG("scaling_factor is %.f, physical diameter is %d px\n",
-          scaling_factor(), button_diameter_physical);
+          scaling_factor, button_diameter_physical);
 
     if (!vistype)
         vistype = get_root_visual_type(screen);
@@ -194,8 +189,9 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
         cairo_fill(xcb_ctx);
     }
 
-    if (unlock_indicator) {
-        cairo_scale(ctx, scaling_factor(), scaling_factor());
+    if (unlock_indicator &&
+        (unlock_state >= STATE_KEY_PRESSED || auth_state > STATE_AUTH_IDLE)) {
+        cairo_scale(ctx, scaling_factor, scaling_factor);
         /* Draw a (centered) circle with transparent background. */
         cairo_set_line_width(ctx, 3.0);
         cairo_arc(ctx,
@@ -240,33 +236,70 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
         set_auth_color('l');
         cairo_stroke(ctx);
 
+        /* Display a (centered) text of the current PAM state. */
+        char *text = NULL;
+        /* We don't want to show more than a 3-digit number. */
+        char buf[4];
+
+        cairo_set_source_rgb(ctx, 0, 0, 0);
+        cairo_select_font_face(ctx, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(ctx, 28.0);
+        switch (auth_state) {
+            case STATE_AUTH_VERIFY:
+                text = "Verifying…";
+                break;
+            case STATE_AUTH_LOCK:
+                text = "Locking…";
+                break;
+            case STATE_AUTH_WRONG:
+                text = "Wrong!";
+                break;
+            case STATE_I3LOCK_LOCK_FAILED:
+                text = "Lock failed!";
+                break;
+            default:
+                if (unlock_state == STATE_NOTHING_TO_DELETE) {
+                    text = "No input";
+                }
+                if (show_failed_attempts && failed_attempts > 0) {
+                    if (failed_attempts > 999) {
+                        text = "> 999";
+                    } else {
+                        snprintf(buf, sizeof(buf), "%d", failed_attempts);
+                        text = buf;
+                    }
+                    cairo_set_source_rgb(ctx, 1, 0, 0);
+                    cairo_set_font_size(ctx, 32.0);
+                }
+                break;
+        }
+
         /* Display (centered) Time */
         char *timetext = malloc(6);
+        if (!text) {
+            time_t curtime = time(NULL);
+            struct tm *tm = localtime(&curtime);
+            if (use24hour)
+                strftime(timetext, 100, TIME_FORMAT_24, tm);
+            else
+                strftime(timetext, 100, TIME_FORMAT_12, tm);
 
-        time_t curtime = time(NULL);
-        struct tm *tm = localtime(&curtime);
-        if (use24hour)
-            strftime(timetext, 100, TIME_FORMAT_24, tm);
-        else
-            strftime(timetext, 100, TIME_FORMAT_12, tm);
+            set_auth_color('l');
+            cairo_set_font_size(ctx, 36.0);
+            text = timetext;
+        }
+        cairo_text_extents_t extents;
+        double x, y;
 
-        /* Text */
-        set_auth_color('l');
-        cairo_set_font_size(ctx, 36.0);
+        cairo_text_extents(ctx, text, &extents);
+        x = BUTTON_CENTER - ((extents.width / 2) + extents.x_bearing);
+        y = BUTTON_CENTER - ((extents.height / 2) + extents.y_bearing);
 
-        cairo_text_extents_t time_extents;
-        double time_x, time_y;
-        //cairo_select_font_face(ctx, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-
-        cairo_text_extents(ctx, timetext, &time_extents);
-        time_x = BUTTON_CENTER - ((time_extents.width / 2) + time_extents.x_bearing);
-        time_y = BUTTON_CENTER - ((time_extents.height / 2) + time_extents.y_bearing);
-
-        cairo_move_to(ctx, time_x, time_y);
-        cairo_show_text(ctx, timetext);
+        cairo_move_to(ctx, x, y);
+        cairo_show_text(ctx, text);
         cairo_close_path(ctx);
 
-        free(timetext);
+        free(timetext);  // Free memory where time was stored
 
         if (auth_state == STATE_AUTH_WRONG && (modifier_string != NULL)) {
             cairo_text_extents_t extents;

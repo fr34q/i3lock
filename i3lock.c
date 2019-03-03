@@ -8,44 +8,50 @@
  */
 #include <config.h>
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <pwd.h>
-#include <sys/types.h>
-#include <string.h>
-#include <unistd.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <xcb/xcb.h>
-#include <xcb/xkb.h>
+#include <assert.h>
 #include <err.h>
 #include <errno.h>
-#include <assert.h>
+#include <pwd.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <xcb/xcb.h>
+#include <xcb/xkb.h>
 #ifdef __OpenBSD__
 #include <bsd_auth.h>
 #else
 #include <security/pam_appl.h>
 #endif
-#include <getopt.h>
-#include <string.h>
-#include <ev.h>
-#include <sys/mman.h>
-#include <xkbcommon/xkbcommon.h>
-#include <xkbcommon/xkbcommon-compose.h>
-#include <xkbcommon/xkbcommon-x11.h>
 #include <cairo.h>
 #include <cairo/cairo-xcb.h>
+#include <ev.h>
+#include <getopt.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <xkbcommon/xkbcommon-compose.h>
+#include <xkbcommon/xkbcommon-x11.h>
+#include <xkbcommon/xkbcommon.h>
 #ifdef __OpenBSD__
 #include <strings.h> /* explicit_bzero(3) */
 #endif
-#include <xcb/xcb_aux.h>
 #include <xcb/randr.h>
+#include <xcb/xcb_aux.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <linux/vt.h>
+#include <sys/ioctl.h>
+#endif
 
-#include "i3lock.h"
-#include "xcb.h"
 #include "cursors.h"
-#include "unlock_indicator.h"
+#include "dpi.h"
+#include "i3lock.h"
 #include "randr.h"
+#include "unlock_indicator.h"
+#include "xcb.h"
 
 #define TSTAMP_N_SECS(n) (n * 1.0)
 #define TSTAMP_N_MINS(n) (60 * TSTAMP_N_SECS(n))
@@ -60,10 +66,10 @@ static void input_done(void);
 /* We need this for libxkbfile */
 
 /* Color options */
-char color[7] = "ffffff"; // background
-char verifycolor[7] = "00ff00"; // verify
-char wrongcolor[7] = "ff0000"; // wrong
-char idlecolor[7] = "000000"; // idle
+char color[7] = "ffffff";        // background
+char verifycolor[7] = "00ff00";  // verify
+char wrongcolor[7] = "ff0000";   // wrong
+char idlecolor[7] = "000000";    // idle
 
 /* Time format */
 bool use24hour = false;
@@ -455,6 +461,12 @@ static void handle_key_press(xcb_key_press_event_t *event) {
             return;
         default:
             skip_repeated_empty_password = false;
+            // A new password is being entered, but a previous one is pending.
+            // Discard the old one and clear the retry_verification flag.
+            if (retry_verification) {
+                retry_verification = false;
+                clear_input();
+            }
     }
 
     switch (ksym) {
@@ -666,7 +678,7 @@ static bool verify_png_image(const char *image_path) {
 
     // Check PNG header according to the specification, available at:
     // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-    static unsigned char PNG_REFERENCE_HEADER[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    static unsigned char PNG_REFERENCE_HEADER[8] = {137, 80, 78, 71, 13, 10, 26, 10};
     if (memcmp(PNG_REFERENCE_HEADER, png_header, sizeof(png_header)) != 0) {
         fprintf(stderr, "File \"%s\" does not start with a PNG header. i3lock currently only supports loading PNG files.\n", image_path);
         return false;
@@ -749,7 +761,7 @@ static void xcb_check_cb(EV_P_ ev_check *w, int revents) {
     xcb_generic_event_t *event;
 
     if (xcb_connection_has_error(conn))
-        errx(EXIT_FAILURE, "X11 connection broke, did your server terminate?\n");
+        errx(EXIT_FAILURE, "X11 connection broke, did your server terminate?");
 
     while ((event = xcb_poll_for_event(conn)) != NULL) {
         if (event->response_type == 0) {
@@ -819,7 +831,7 @@ static void raise_loop(xcb_window_t window) {
     int screens;
 
     if (xcb_connection_has_error((conn = xcb_connect(NULL, &screens))) > 0)
-        errx(EXIT_FAILURE, "Cannot open display\n");
+        errx(EXIT_FAILURE, "Cannot open display");
 
     /* We need to know about the window being obscured or getting destroyed. */
     xcb_change_window_attributes(conn, window, XCB_CW_EVENT_MASK,
@@ -865,15 +877,15 @@ static void raise_loop(xcb_window_t window) {
 int verify_hex(char *arg, char *colortype, char *varname) {
     /* Skip # if present */
     if (arg[0] == '#') {
-        arg++;  
+        arg++;
     }
-        
+
     if (strlen(arg) != 6 || sscanf(arg, "%06[0-9a-fA-F]", colortype) != 1) {
         errx(EXIT_FAILURE, "%s is invalid, it must be given in 3-byte hexadecimal format: rrggbb\n", varname);
 
         return 0;
     }
-        
+
     return 1;
 }
 
@@ -885,6 +897,11 @@ int main(int argc, char *argv[]) {
     int ret;
     struct pam_conv conv = {conv_callback, NULL};
 #endif
+#if defined(__linux__)
+    bool lock_tty_switching = false;
+    int term = -1;
+#endif
+
     int curs_choice = CURS_NONE;
     int o;
     int longoptind = 0;
@@ -903,83 +920,86 @@ int main(int argc, char *argv[]) {
         {"ignore-empty-password", no_argument, NULL, 'e'},
         {"inactivity-timeout", required_argument, NULL, 'I'},
         {"show-failed-attempts", no_argument, NULL, 'f'},
-        {"verify-color", required_argument, NULL, 'o'},
-        {"wrong-color", required_argument, NULL, 'w'},
-        {"idle-color", required_argument, NULL, 'l'},
+        {"lock-console", no_argument, NULL, 'l'},
         {"24", no_argument, NULL, '4'},
-        {NULL, no_argument, NULL, 0}
-    };
+        {NULL, no_argument, NULL, 0}};
 
     if ((pw = getpwuid(getuid())) == NULL)
         err(EXIT_FAILURE, "getpwuid() failed");
     if ((username = pw->pw_name) == NULL)
-        errx(EXIT_FAILURE, "pw->pw_name is NULL.\n");
+        errx(EXIT_FAILURE, "pw->pw_name is NULL.");
 
-    char *optstring = "hvnbdc:o:w:l:p:ui:teI:f";
-    while ((o = getopt_long(argc, argv, optstring, longopts, &optind)) != -1) {
+    char *optstring = "hvnbdc:p:ui:teI:fl";
+    while ((o = getopt_long(argc, argv, optstring, longopts, &longoptind)) != -1) {
         switch (o) {
-        case 'v':
-            errx(EXIT_SUCCESS, "version " I3LOCK_VERSION " © 2010 Michael Stapelberg");
-        case 'n':
-            dont_fork = true;
-            break;
-        case 'b':
-            beep = true;
-            break;
-        case 'd':
-            fprintf(stderr, "DPMS support has been removed from i3lock. Please see the manpage i3lock(1).\n");
-            break;
-        case 'I': {
-            fprintf(stderr, "Inactivity timeout only makes sense with DPMS, which was removed. Please see the manpage i3lock(1).\n");
-            break;
-        }
-        case 'c': 
-            verify_hex(optarg,color, "color");
-            break;
-        case 'o':
-            verify_hex(optarg,verifycolor, "verifycolor");
-            break;
-        case 'w':
-            verify_hex(optarg,wrongcolor, "wrongcolor");
-            break;
-        case 'l':
-            verify_hex(optarg,idlecolor, "idlecolor");
-            break;
-        case '4':
-            use24hour = true;
-            break;
-        case 'u':
-            unlock_indicator = false;
-            break;
-        case 'i':
-            image_path = strdup(optarg);
-            break;
-        case 't':
-            tile = true;
-            break;
-        case 'p':
-            if (!strcmp(optarg, "win")) {
-                curs_choice = CURS_WIN;
-            } else if (!strcmp(optarg, "default")) {
-                curs_choice = CURS_DEFAULT;
-            } else {
-                errx(EXIT_FAILURE, "i3lock: Invalid pointer type given. Expected one of \"win\" or \"default\".\n");
+            case 'v':
+                errx(EXIT_SUCCESS, "version " I3LOCK_VERSION " © 2010 Michael Stapelberg");
+            case 'n':
+                dont_fork = true;
+                break;
+            case 'b':
+                beep = true;
+                break;
+            case 'd':
+                fprintf(stderr, "DPMS support has been removed from i3lock. Please see the manpage i3lock(1).\n");
+                break;
+            case 'I': {
+                fprintf(stderr, "Inactivity timeout only makes sense with DPMS, which was removed. Please see the manpage i3lock(1).\n");
+                break;
             }
-            break;
-        case 'e':
-            ignore_empty_password = true;
-            break;
-        case 0:
-            if (strcmp(longopts[optind].name, "debug") == 0)
-                debug_mode = true;
-            break;
-        case 'f':
-            show_failed_attempts = true;
-            break;
-        default:
-            errx(EXIT_FAILURE, "Syntax: i3lock [-v] [-n] [-b] [-d] [-c color] [-o color] [-w color] [-l color] [-u] [-p win|default]"
-            " [-i image.png] [-t] [-e] [-I] [-f] [--24]"
-            );
+            case 'c': {
+                char *arg = optarg;
+
+                /* Skip # if present */
+                if (arg[0] == '#')
+                    arg++;
+
+                if (strlen(arg) != 6 || sscanf(arg, "%06[0-9a-fA-F]", color) != 1)
+                    errx(EXIT_FAILURE, "color is invalid, it must be given in 3-byte hexadecimal format: rrggbb");
+
+                break;
+            }
+            case 'u':
+                unlock_indicator = false;
+                break;
+            case 'i':
+                image_path = strdup(optarg);
+                break;
+            case 't':
+                tile = true;
+                break;
+            case 'p':
+                if (!strcmp(optarg, "win")) {
+                    curs_choice = CURS_WIN;
+                } else if (!strcmp(optarg, "default")) {
+                    curs_choice = CURS_DEFAULT;
+                } else {
+                    errx(EXIT_FAILURE, "i3lock: Invalid pointer type given. Expected one of \"win\" or \"default\".");
+                }
+                break;
+            case 'e':
+                ignore_empty_password = true;
+                break;
+            case 0:
+                if (strcmp(longopts[longoptind].name, "debug") == 0)
+                    debug_mode = true;
+                break;
+            case '4':
+                use24hour = true;
+                break;
+            case 'f':
+                show_failed_attempts = true;
+                break;
+            case 'l':
+#if defined(__linux__)
+                lock_tty_switching = true;
+#else
+                errx(EXIT_FAILURE, "TTY switch locking is only supported on Linux.");
+#endif
+                break;
+            default:
+                errx(EXIT_FAILURE, "Syntax: i3lock [-v] [-n] [-b] [-d] [-c color] [-u] [-p win|default]"
+                                   " [-i image.png] [-t] [-e] [-I timeout] [-f] [-l]");
         }
     }
 
@@ -1068,6 +1088,8 @@ int main(int argc, char *argv[]) {
 
     screen = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
 
+    init_dpi();
+
     randr_init(&randr_base, screen->root);
     randr_query(screen->root);
 
@@ -1141,7 +1163,22 @@ int main(int argc, char *argv[]) {
     /* Initialize the libev event loop. */
     main_loop = EV_DEFAULT;
     if (main_loop == NULL)
-        errx(EXIT_FAILURE, "Could not initialize libev. Bad LIBEV_FLAGS?\n");
+        errx(EXIT_FAILURE, "Could not initialize libev. Bad LIBEV_FLAGS?");
+
+#if defined(__linux__)
+
+    /* Lock tty switching */
+    if (lock_tty_switching) {
+        if ((term = open("/dev/console", O_RDWR)) == -1) {
+            perror("error locking TTY switching: opening console failed");
+        }
+
+        if (term != -1 && (ioctl(term, VT_LOCKSWITCH)) == -1) {
+            perror("error locking TTY switching: locking console failed");
+        }
+    }
+
+#endif
 
     /* Explicitly call the screen redraw in case "locking…" message was displayed */
     auth_state = STATE_AUTH_IDLE;
@@ -1172,6 +1209,18 @@ int main(int argc, char *argv[]) {
     if (stolen_focus == XCB_NONE) {
         return 0;
     }
+
+#if defined(__linux__)
+    /* Restore tty switching */
+    if (lock_tty_switching) {
+        if (term != -1 && (ioctl(term, VT_UNLOCKSWITCH)) == -1) {
+            perror("error unlocking TTY switching: unlocking console failed");
+        }
+
+        close(term);
+    }
+
+#endif
 
     DEBUG("restoring focus to X11 window 0x%08x\n", stolen_focus);
     xcb_ungrab_pointer(conn, XCB_CURRENT_TIME);
